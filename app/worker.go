@@ -188,11 +188,11 @@ func xWorker(workerData Info, u url.URL) {
 
 	slog <- saveLog{workerData.Rid, time.Now().Unix(), string(message)}
 
-	quit := make(chan bool)
+	quit := make(chan struct{})
 	pid := 3
 
 	defer func() {
-		quit <- true
+		close(quit)
 	}()
 
 	go func() {
@@ -213,6 +213,8 @@ func xWorker(workerData Info, u url.URL) {
 			}
 		}
 	}()
+
+	dons := make(map[string]struct{})
 
 	for {
 		select {
@@ -257,6 +259,12 @@ func xWorker(workerData Info, u url.URL) {
 			d := &DonateResponse{}
 			if err = json.Unmarshal(m.Body, d); err == nil {
 				//fmt.Println(d.F.Username, "send", d.A, "tokens")
+
+				workerData.Tips++
+				if _, ok := dons[d.F.Username]; !ok {
+					dons[d.F.Username] = struct{}{}
+					workerData.Dons++
+				}
 
 				save <- saveData{workerData.room, d.F.Username, workerData.Rid, d.A, now}
 
