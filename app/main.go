@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"math/rand"
 	"net"
@@ -17,23 +18,29 @@ import (
 type Rooms struct {
 	Count chan int
 	Json  chan string
-	Add   chan Info
+	Check chan string
+	Stop  chan string
 	Del   chan string
+	Add   chan Info
 }
 
-var hub = newHub()
-var Mysql, Clickhouse *sqlx.DB
-var json = jsoniter.ConfigCompatibleWithStandardLibrary
+var (
+	Mysql, Clickhouse *sqlx.DB
 
-var save = make(chan saveData, 100)
-var slog = make(chan saveLog, 100)
+	json = jsoniter.ConfigCompatibleWithStandardLibrary
 
-var rooms = &Rooms{
-	Count: make(chan int),
-	Json:  make(chan string),
-	Add:   make(chan Info),
-	Del:   make(chan string),
-}
+	save = make(chan saveData, 100)
+	slog = make(chan saveLog, 100)
+
+	rooms = &Rooms{
+		Count: make(chan int),
+		Json:  make(chan string),
+		Check: make(chan string),
+		Stop:  make(chan string),
+		Del:   make(chan string),
+		Add:   make(chan Info),
+	}
+)
 
 func main() {
 	rand.Seed(time.Now().UnixNano())
@@ -43,16 +50,18 @@ func main() {
 	initMysql()
 	initClickhouse()
 
-	go hub.run()
 	go mapRooms()
 	go announceCount()
 	go saveDB()
 	go saveLogs()
+	go broadcast()
 
-	http.HandleFunc("/bongacams/ws/", hub.wsHandler)
+	http.HandleFunc("/bongacams/ws/", wsHandler)
 	http.HandleFunc("/bongacams/cmd/", cmdHandler)
 	http.HandleFunc("/bongacams/list/", listHandler)
 	http.HandleFunc("/bongacams/debug/", debugHandler)
+
+	go fastStart()
 
 	const SOCK = "/tmp/bongacams.sock"
 	os.Remove(SOCK)
@@ -83,4 +92,41 @@ func initClickhouse() {
 
 func randInt(min int, max int) int {
 	return min + rand.Intn(max-min)
+}
+
+func fastStart() {
+	defer func() {
+		go updateFileRooms()
+	}()
+	dat, err := os.ReadFile(conf.Conn["start"])
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	list := make(map[string]Info)
+	if err := json.Unmarshal(dat, &list); err != nil {
+		fmt.Println(err.Error())
+		return
+	}
+	now := time.Now().Unix()
+	for k, v := range list {
+		if now > v.Last+60*20 {
+			continue
+		}
+		fmt.Println("fastStart:", k, v.Server, v.Proxy)
+		workerData := Info{
+			room:   k,
+			Server: v.Server,
+			Proxy:  v.Proxy,
+			Online: v.Online,
+			Start:  v.Start,
+			Last:   now,
+			Rid:    v.Rid,
+			Income: v.Income,
+			Dons:   v.Dons,
+			Tips:   v.Tips,
+		}
+		startRoom(workerData)
+		time.Sleep(2 * time.Second)
+	}
 }

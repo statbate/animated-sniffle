@@ -5,10 +5,6 @@ import (
 	"time"
 )
 
-type tID struct {
-	Id int64 `db:"id"`
-}
-
 type saveData struct {
 	Room   string
 	From   string
@@ -29,29 +25,46 @@ type DonatorCache struct {
 }
 
 func getDonId(name string) int64 {
-	donator := new(tID)
-	err := Mysql.Get(donator, "SELECT id FROM donator WHERE name=?", name)
+	var id int64
+	err := Mysql.Get(&id, "SELECT id FROM donator WHERE name=?", name)
 	if err != nil {
 		res, _ := Mysql.Exec("INSERT INTO donator (`name`) VALUES (?)", name)
-		donator.Id, _ = res.LastInsertId()
+		id, _ = res.LastInsertId()
 	}
-	return donator.Id
+	return id
 }
 
-func getRoomInfo(name string) (*tID, bool) {
+func getRoomInfo(name string) (int64, bool) {
+	var id int64
 	result := true
-	room := new(tID)
-	err := Mysql.Get(room, "SELECT id FROM room WHERE name=?", name)
+	err := Mysql.Get(&id, "SELECT id FROM room WHERE name=?", name)
 	if err != nil {
 		result = false
 	}
-	return room, result
+	return id, result
+}
+
+func getSumTokens() int64 {
+	r := struct {
+		Date string
+		Sum  int64
+	}{}
+	err := Clickhouse.Get(&r, "SELECT toStartOfHour(toDateTime(`unix`)) as date, SUM(`token`) as sum FROM `stat` WHERE time = today() GROUP BY date ORDER BY date DESC LIMIT 1")
+	if err == nil && r.Sum > 0 {
+		return r.Sum
+	}
+	return 0
 }
 
 func saveDB() {
-	last := time.Now().Unix()
+	hours, _, _ := time.Now().Clock()
+
 	bulk := make(map[int]saveData)
+	update := make(map[int64]int64)
 	data := make(map[string]*DonatorCache)
+	index := make(map[string]int64)
+
+	index = map[string]int64{"hours": int64(hours), "tokens": getSumTokens(), "last": time.Now().Unix()}
 
 	for {
 		select {
@@ -66,6 +79,81 @@ func saveDB() {
 				data[m.From] = &DonatorCache{Id: getDonId(m.From), Last: now}
 			}
 
+			num := len(bulk)
+
+			bulk[num] = m
+
+			update[m.Rid] = m.Now
+
+			if num > 512 {
+
+				tx, err := Mysql.Begin()
+				if err == nil {
+					st, _ := tx.Prepare("INSERT INTO `stat` (`did`, `rid`, `token`, `time`) VALUES (?, ?, ?, ?)")
+					for _, v := range bulk {
+						st.Exec(data[v.From].Id, v.Rid, v.Amount, v.Now)
+					}
+					tx.Commit()
+					st.Close()
+				}
+
+				tx, err = Mysql.Begin()
+				if err == nil {
+					st, _ := tx.Prepare("UPDATE `room` SET `last` = ? WHERE `id` = ?")
+					for k, v := range update {
+						st.Exec(v, k)
+					}
+					tx.Commit()
+					st.Close()
+				}
+
+				tx, err = Clickhouse.Begin()
+				if err == nil {
+					st, _ := tx.Prepare("INSERT INTO stat VALUES (?, ?, ?, ?, ?)")
+					for _, v := range bulk {
+						st.Exec(uint32(data[v.From].Id), uint32(v.Rid), uint32(v.Amount), time.Unix(v.Now, 0), uint32(v.Now))
+					}
+					tx.Commit()
+					st.Close()
+				}
+
+				bulk = make(map[int]saveData)
+				update = make(map[int64]int64)
+			}
+
+			if m.Amount > 99 {
+				msg, err := json.Marshal(struct {
+					Room    string `json:"room"`
+					Donator string `json:"donator"`
+					Amount  int64  `json:"amount"`
+				}{
+					Room:    m.Room,
+					Donator: m.From,
+					Amount:  m.Amount,
+				})
+				if err == nil {
+					ws.Send <- msg
+				}
+			}
+
+			hours, minutes, seconds := time.Now().Clock()
+			if int64(hours) == index["hours"] {
+				index["tokens"] += m.Amount
+			} else {
+				index = map[string]int64{"hours": int64(hours), "tokens": 0, "last": 0}
+			}
+
+			if minutes >= 5 && now > index["last"]+30 {
+				seconds += minutes * 60
+				msg, err := json.Marshal(struct {
+					Index int64 `json:"index"`
+				}{Index: index["tokens"] / int64(seconds) * 3600 / 1000 * 5 / 100})
+				if err == nil {
+					ws.Send <- msg
+				}
+				index["last"] = now
+			}
+
 			if randInt(0, 10000) == 777 { // 0.001%
 				l := len(data)
 				for k, v := range data {
@@ -75,49 +163,11 @@ func saveDB() {
 				}
 				fmt.Println("Clean map:", l, "=>", len(data))
 			}
-
-			Mysql.Exec("UPDATE `room` SET `last` = ? WHERE `id` = ?", m.Now, m.Rid)
-
-			num := len(bulk)
-
-			bulk[num] = m
-
-			if num >= 999 || now >= last+10 {
-				tx, err := Mysql.Begin()
-				if err == nil {
-					for _, v := range bulk {
-						tx.Exec("INSERT INTO `stat` (`did`, `rid`, `token`, `time`) VALUES (?, ?, ?, ?)", data[v.From].Id, v.Rid, v.Amount, v.Now)
-					}
-				}
-				tx.Commit()
-
-				tx, err = Clickhouse.Begin()
-				if err == nil {
-					st, _ := tx.Prepare("INSERT INTO stat VALUES (?, ?, ?, ?)")
-					//fmt.Println("G:", err)
-					for _, v := range bulk {
-						st.Exec(uint32(data[v.From].Id), uint32(v.Rid), uint32(v.Amount), time.Unix(v.Now, 0))
-						//fmt.Println("B:", aaa, sss)
-					}
-					tx.Commit()
-					st.Close()
-				}
-
-				last = now
-				bulk = make(map[int]saveData)
-			}
-			if m.Amount > 99 {
-				msg, err := json.Marshal(AnnounceDonate{Room: m.Room, Donator: m.From, Amount: m.Amount})
-				if err == nil {
-					hub.broadcast <- msg
-				}
-			}
 		}
 	}
 }
 
 func saveLogs() {
-	last := time.Now().Unix()
 	bulk := make(map[int]saveLog)
 	for {
 		select {
@@ -125,16 +175,16 @@ func saveLogs() {
 			if len(m.Mes) > 0 {
 				num := len(bulk)
 				bulk[num] = m
-				now := time.Now().Unix()
-				if num >= 2047 || now >= last+10 {
+				if num > 2048 {
 					tx, err := Mysql.Begin()
 					if err == nil {
+						st, _ := tx.Prepare("INSERT INTO `logs` (`rid`, `time`, `mes`) VALUES (?, ?, ?)")
 						for _, v := range bulk {
-							tx.Exec("INSERT INTO `logs` (`rid`, `time`, `mes`) VALUES (?, ?, ?)", v.Rid, v.Now, v.Mes)
+							st.Exec(v.Rid, v.Now, v.Mes)
 						}
 						tx.Commit()
+						st.Close()
 					}
-					last = now
 					bulk = make(map[int]saveLog)
 				}
 			}

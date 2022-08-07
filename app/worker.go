@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"strings"
 	"time"
-	//"bytes"
 )
 
 var uptime = time.Now().Unix()
@@ -40,16 +39,6 @@ type DonateResponse struct {
 	A int64 `json:"a"`
 }
 
-type AnnounceCount struct {
-	Count int `json:"count"`
-}
-
-type AnnounceDonate struct {
-	Room    string `json:"room"`
-	Donator string `json:"donator"`
-	Amount  int64  `json:"amount"`
-}
-
 func mapRooms() {
 
 	data := make(map[string]*Info)
@@ -57,7 +46,7 @@ func mapRooms() {
 	for {
 		select {
 		case m := <-rooms.Add:
-			data[m.room] = &Info{Server: m.Server, Proxy: m.Proxy, Start: m.Start, Last: m.Last, Income: m.Income}
+			data[m.room] = &Info{Server: m.Server, Proxy: m.Proxy, Start: m.Start, Last: m.Last, Online: m.Online, Income: m.Income, Dons: m.Dons, Tips: m.Tips, ch: m.ch}
 
 		case s := <-rooms.Json:
 			j, err := json.Marshal(data)
@@ -71,7 +60,17 @@ func mapRooms() {
 
 		case key := <-rooms.Del:
 			delete(data, key)
-			removeRoom(key)
+
+		case room := <-rooms.Check:
+			if _, ok := data[room]; !ok {
+				room = ""
+			}
+			rooms.Check <- room
+
+		case room := <-rooms.Stop:
+			if _, ok := data[room]; ok {
+				close(data[room].ch)
+			}
 		}
 	}
 }
@@ -81,9 +80,11 @@ func announceCount() {
 		time.Sleep(30 * time.Second)
 		rooms.Count <- 0
 		l := <-rooms.Count
-		msg, err := json.Marshal(AnnounceCount{Count: l})
+		msg, err := json.Marshal(struct {
+			Count int `json:"count"`
+		}{Count: l})
 		if err == nil {
-			hub.broadcast <- msg
+			ws.Send <- msg
 		}
 	}
 }
@@ -118,10 +119,16 @@ func getAMF(room string) (bool, *AuthResponse) {
 	return true, v
 }
 
-func statRoom(chQuit chan struct{}, room, server, proxy string, info *tID, u url.URL) {
-	//fmt.Println("Start", room, "server", server, "proxy", proxy)
+func xWorker(workerData Info, u url.URL) {
+	fmt.Println("Start", workerData.room, "server", workerData.Server, "proxy", workerData.Proxy)
 
-	ok, v := getAMF(room)
+	rooms.Add <- workerData
+
+	defer func() {
+		rooms.Del <- workerData.room
+	}()
+
+	ok, v := getAMF(workerData.room)
 	if !ok {
 		fmt.Println("exit: no amf parms")
 		return
@@ -129,85 +136,62 @@ func statRoom(chQuit chan struct{}, room, server, proxy string, info *tID, u url
 
 	Dialer := *websocket.DefaultDialer
 
-	if _, ok := conf.Proxy[proxy]; ok {
+	if _, ok := conf.Proxy[workerData.Proxy]; ok {
 		Dialer = websocket.Dialer{
 			Proxy: http.ProxyURL(&url.URL{
 				Scheme: "http", // or "https" depending on your proxy
-				Host:   conf.Proxy[proxy],
+				Host:   conf.Proxy[workerData.Proxy],
 				Path:   "/",
 			}),
 			HandshakeTimeout: 45 * time.Second, // https://pkg.go.dev/github.com/gorilla/websocket
 		}
 	}
 
-	now := time.Now().Unix()
-	workerData := Info{room, server, proxy, now, now, 0}
-	rooms.Add <- workerData
-
-	defer func() {
-		fmt.Println("defer remove map", room)
-		rooms.Del <- room
-	}()
-
 	c, _, err := Dialer.Dial(u.String(), nil)
 	if err != nil {
-		fmt.Println(err.Error(), room)
+		fmt.Println(err.Error(), workerData.room)
 		return
 	}
 
-	defer func() {
-		fmt.Println("defer close", room)
-		c.Close()
-	}()
+	defer c.Close()
 
 	c.SetReadDeadline(time.Now().Add(60 * time.Second))
-
-	fmt.Println("send first", room)
 
 	if err = c.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"id":%d,"name":"joinRoom","args":["%s",{"username":"%s","displayName":"%s","location":"%s","chathost":"%s","isRu":%t,"isPerformer":false,"hasStream":false,"isLogged":false,"isPayable":false,"showType":"public"},"%s"]}`, 1, v.UserData.Chathost, v.UserData.Username, v.UserData.DisplayName, v.UserData.Location, v.UserData.Chathost, v.UserData.IsRu, v.LocalData.DataKey))); err != nil {
 		fmt.Println(err.Error())
 		return
 	}
 
-	fmt.Println("read first", room)
-
 	_, message, err := c.ReadMessage()
 	if err != nil {
-		fmt.Println(err.Error(), room)
+		fmt.Println(err.Error(), workerData.room)
 		return
 	}
 
-	fmt.Println(room, len(string(message)), string(message))
-
-	slog <- saveLog{info.Id, now, string(message)}
+	slog <- saveLog{workerData.Rid, time.Now().Unix(), string(message)}
 
 	if string(message) == `{"id":1,"result":{"audioAvailable":false,"freeShow":false},"error":null}` {
-		fmt.Println("room offline, exit", room)
+		fmt.Println("room offline, exit", workerData.room)
 		return
 	}
-
-	fmt.Println("send second", room)
 
 	if err = c.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"id":%d,"name":"ChatModule.connect","args":["public-chat"]}`, 2))); err != nil {
-		fmt.Println(err.Error(), room)
+		fmt.Println(err.Error(), workerData.room)
 		return
 	}
 
-	fmt.Println("read second", room)
 	_, message, err = c.ReadMessage()
 	if err != nil {
-		fmt.Println(err.Error(), room)
+		fmt.Println(err.Error(), workerData.room)
 		return
 	}
 
-	fmt.Println(room, len(string(message)), string(message))
+	slog <- saveLog{workerData.Rid, time.Now().Unix(), string(message)}
 
-	slog <- saveLog{info.Id, now, string(message)}
 	quit := make(chan bool)
 	pid := 3
 
 	defer func() {
-		fmt.Println("defer quit", room)
 		quit <- true
 	}()
 
@@ -220,8 +204,8 @@ func statRoom(chQuit chan struct{}, room, server, proxy string, info *tID, u url
 				return
 			case <-ticker.C:
 				if err = c.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"id":%d,"name":"ping"}`, pid))); err != nil {
-					fmt.Println(err.Error(), room)
-					close(chWorker.Map[room].chQuit)
+					fmt.Println(err.Error(), workerData.room)
+					rooms.Stop <- workerData.room
 					return
 				}
 				pid++
@@ -232,52 +216,52 @@ func statRoom(chQuit chan struct{}, room, server, proxy string, info *tID, u url
 
 	for {
 		select {
-		case <-chQuit:
-			fmt.Println("Exit room:", room)
+		case <-workerData.ch:
+			fmt.Println("Exit room:", workerData.room)
 			return
-
 		default:
-			c.SetReadDeadline(time.Now().Add(30 * time.Minute))
-			_, message, err := c.ReadMessage()
-			if err != nil {
-				fmt.Println(err.Error())
-				return
-			}
+		}
 
-			now = time.Now().Unix()
+		c.SetReadDeadline(time.Now().Add(30 * time.Minute))
+		_, message, err := c.ReadMessage()
+		if err != nil {
+			fmt.Println(err.Error())
+			return
+		}
 
-			slog <- saveLog{info.Id, now, string(message)}
+		now := time.Now().Unix()
 
-			m := &ServerResponse{}
+		slog <- saveLog{workerData.Rid, now, string(message)}
 
-			if err = json.Unmarshal(message, m); err != nil {
-				fmt.Println(err.Error(), room)
-				continue
-			}
+		m := &ServerResponse{}
 
-			workerData.Last = now
-			rooms.Add <- workerData
+		if err = json.Unmarshal(message, m); err != nil {
+			fmt.Println(err.Error(), workerData.room)
+			continue
+		}
 
-			if m.Type == "ServerMessageEvent:PERFORMER_STATUS_CHANGE" && string(m.Body) == `"offline"` {
-				fmt.Println(m.Type, room)
-				return
-			}
+		workerData.Last = now
+		rooms.Add <- workerData
 
-			if m.Type == "ServerMessageEvent:ROOM_CLOSE" {
-				fmt.Println(m.Type, room)
-				return
-			}
+		if m.Type == "ServerMessageEvent:PERFORMER_STATUS_CHANGE" && string(m.Body) == `"offline"` {
+			fmt.Println(m.Type, workerData.room)
+			return
+		}
 
-			if m.Type == "ServerMessageEvent:INCOMING_TIP" {
-				d := &DonateResponse{}
-				if err = json.Unmarshal(m.Body, d); err == nil {
-					//fmt.Println(d.F.Username, " send ", d.A, "tokens")
+		if m.Type == "ServerMessageEvent:ROOM_CLOSE" {
+			fmt.Println(m.Type, workerData.room)
+			return
+		}
 
-					save <- saveData{room, d.F.Username, info.Id, d.A, now}
+		if m.Type == "ServerMessageEvent:INCOMING_TIP" {
+			d := &DonateResponse{}
+			if err = json.Unmarshal(m.Body, d); err == nil {
+				//fmt.Println(d.F.Username, "send", d.A, "tokens")
 
-					workerData.Income += d.A
-					rooms.Add <- workerData
-				}
+				save <- saveData{workerData.room, d.F.Username, workerData.Rid, d.A, now}
+
+				workerData.Income += d.A
+				rooms.Add <- workerData
 			}
 		}
 	}

@@ -4,73 +4,66 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"runtime"
 	"strings"
-	"sync"
-	//	"time"
+	"time"
 )
 
+var memInfo runtime.MemStats
+
 type Info struct {
+	ch     chan struct{}
 	room   string
 	Server string `json:"server"`
 	Proxy  string `json:"proxy"`
+	Online string `json:"online"`
+	Rid    int64  `json:"rid"`
 	Start  int64  `json:"start"`
 	Last   int64  `json:"last"`
 	Income int64  `json:"income"`
+	Dons   int64  `json:"dons"`
+	Tips   int64  `json:"tips"`
 }
 
-type Debug struct {
-	Goroutines int
-	Alloc      uint64
-	HeapSys    uint64
-	Uptime     int64
-}
-
-type Worker struct {
-	chQuit chan struct{}
-}
-
-type Workers struct {
-	sync.RWMutex
-	Map map[string]*Worker
-}
-
-var (
-	memInfo  runtime.MemStats
-	chWorker = &Workers{Map: make(map[string]*Worker)}
-)
-
-func removeRoom(room string) {
-	if checkWorker(room) {
-		chWorker.Lock()
-		//fmt.Printf("%v remove %v from chWorker.Map \n", time.Now().UnixMilli(), room )
-		delete(chWorker.Map, room)
-		chWorker.Unlock()
+func updateFileRooms() string {
+	for {
+		rooms.Json <- ""
+		s := <-rooms.Json
+		err := os.WriteFile(conf.Conn["start"], []byte(s), 0644)
+		if err != nil {
+			fmt.Println(err)
+		}
+		time.Sleep(10 * time.Second)
 	}
-}
-
-func checkWorker(room string) bool {
-	chWorker.RLock()
-	defer chWorker.RUnlock()
-	if _, ok := chWorker.Map[room]; ok {
-		return true
-	}
-	return false
-}
-
-func listRooms() string {
-	rooms.Json <- ""
-	s := <-rooms.Json
-	return s
 }
 
 func listHandler(w http.ResponseWriter, _ *http.Request) {
-	fmt.Fprint(w, listRooms())
+	dat, err := os.ReadFile(conf.Conn["start"])
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	fmt.Fprint(w, string(dat))
 }
 
 func debugHandler(w http.ResponseWriter, _ *http.Request) {
+	ws.Count <- 0
+	l := <-ws.Count
 	runtime.ReadMemStats(&memInfo)
-	j, err := json.Marshal(Debug{runtime.NumGoroutine(), memInfo.Alloc, memInfo.HeapSys, uptime})
+	j, err := json.Marshal(struct {
+		Goroutines int
+		WebSocket  int
+		Uptime     int64
+		Alloc      uint64
+		HeapSys    uint64
+	}{
+		Goroutines: runtime.NumGoroutine(),
+		Alloc:      memInfo.Alloc,
+		HeapSys:    memInfo.HeapSys,
+		Uptime:     uptime,
+		WebSocket:  l,
+	})
 	if err == nil {
 		fmt.Fprint(w, string(j))
 	}
@@ -81,37 +74,45 @@ func cmdHandler(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "403")
 		return
 	}
-
 	params := r.URL.Query()
 	if len(params["room"]) > 0 && len(params["server"]) > 0 && len(params["proxy"]) > 0 {
-		room := params["room"][0]
-		server := params["server"][0]
-		proxy := params["proxy"][0]
-		if checkWorker(room) {
-			fmt.Println("Already track:", room)
-			return
+		now := time.Now().Unix()
+		workerData := Info{
+			room:   params["room"][0],
+			Server: params["server"][0],
+			Proxy:  params["proxy"][0],
+			Online: "0",
+			Start:  now,
+			Last:   now,
+			Rid:    0,
+			Income: 0,
+			Dons:   0,
+			Tips:   0,
 		}
-
-		info, ok := getRoomInfo(room)
-		if !ok {
-			fmt.Println("No room in MySQL:", room)
-			return
-		}
-
-		chQuit := make(chan struct{})
-
-		chWorker.Lock()
-		chWorker.Map[room] = &Worker{chQuit: chQuit}
-		chWorker.Unlock()
-
-		go statRoom(chQuit, room, server, proxy, info, url.URL{Scheme: "wss", Host: server + ".bcccdn.com", Path: "/websocket"})
-
+		startRoom(workerData)
 	}
 	if len(params["exit"]) > 0 {
-		room := strings.Join(params["exit"], "")
-		if checkWorker(room) {
-			close(chWorker.Map[room].chQuit) // exit gorutine
-			removeRoom(room)
-		}
+		rooms.Stop <- strings.Join(params["exit"], "")
 	}
+	fmt.Fprint(w, string("ok"))
+}
+
+func startRoom(workerData Info) {
+	rooms.Check <- workerData.room
+	testRoom := <-rooms.Check
+	if testRoom == workerData.room {
+		fmt.Println("Already track:", workerData.room)
+		return
+	}
+
+	rid, ok := getRoomInfo(workerData.room)
+	if !ok {
+		fmt.Println("No room in MySQL:", workerData.room)
+		return
+	}
+
+	workerData.Rid = rid
+	workerData.ch = make(chan struct{})
+
+	go xWorker(workerData, url.URL{Scheme: "wss", Host: workerData.Server + ".bcccdn.com", Path: "/websocket"})
 }
