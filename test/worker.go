@@ -1,85 +1,42 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
-	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
 
-type AuthResponse struct {
-	Status    string `json:"status"`
-	LocalData struct {
-		DataKey string `json:"dataKey"`
-	} `json:"localData"`
-	UserData struct {
-		Username    string `json:"username"`
-		DisplayName string `json:"displayName"`
-		Location    string `json:"location"`
-		Chathost    string `json:"chathost"`
-		IsRu        bool   `json:"isRu"`
-	} `json:"userData"`
-}
-
 type ServerResponse struct {
-	TS   int64           `json:"ts"`
-	Type string          `json:"type"`
-	Body json.RawMessage `json:"body"`
+	// {"id":"1660218639317-sub-viewServerChanged:hls-07","status":200,"body":""}
+	// {"subscriptionKey":"global","params":{"subscriptionKey":"clearChatMessages","params":{"senderIds":[80825678]}}}
+	// {"id":"1660218639317-sub-viewServerChanged:hls-07","method":"PUT","url":"/front/clients/9gd4q9r0/subscriptions/viewServerChanged:hls-07"}
+	// {"subscriptionKey":"global","params":{"subscriptionKey":"clearChatMessages","params":{"senderIds":[80825678]}}}
+	// {"subscriptionKey":"newChatMessage:36500801","params":{"message":{"cacheId":"62f4ed9872be2","modelId":36500801,"senderId":36500801,"type":"lovense","details":{"lovenseDetails":{"type":"tip","status":"","text":"","detail":{"name":"land-marks","amount":15,"time":5,"power":"medium"}},"fanClubTier":null,"fanClubNumberMonthsOfSubscribed":0},"userData":{"id":36500801,"username":"DoviaClaire","gender":"female","hasAdminBadge":false,"isAdmin":false,"isSupport":false,"isModel":true,"isStudio":false,"isGold":false,"isUltimate":false,"isGreen":false,"isRegular":false,"isExGreen":false,"hasVrDevice":false,"userRanking":null,"isKing":false,"isKnight":false,"isStudioModerator":false,"isStudioAdmin":false},"createdAt":"2022-08-11T11:52:56Z","additionalData":[],"id":1740865563732962}}}
+	SubscriptionKey string `json:"subscriptionKey,omitempty"`
+	Params          struct {
+		Message struct {
+			Details struct {
+				LovenseDetails struct {
+					Type   string `json:"type,omitempty"`
+					Detail struct {
+						Name   string  `json:"name,omitempty"`
+						Amount float64 `json:"amount,omitepty"`
+					} `json:"detail,omitempty"`
+				} `json:"lovenseDetails"`
+			} `json:"details,omitempty"`
+		} `json:"message,omitempty`
+	} `json:"params,omitempty`
 }
 
-type DonateResponse struct {
-	F struct {
-		Username string `json:"username"`
-	} `json:"f"`
-	A int `json:"a"`
-}
-
-func getAMF(room string) (bool, *AuthResponse) {
-	
-	v := &AuthResponse{}
-	
-	req, err := http.NewRequest(http.MethodPost, "https://rt.bongocams.com/tools/amf.php?res=771840&t=1654437233142", strings.NewReader(`method=getRoomData&args[]=`+room))
-	if err != nil {
-		fmt.Println(err.Error())
-		return false, v
-	}
-	req.Header.Add("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
-	req.Header.Add("X-Requested-With", "XMLHttpRequest")
-	req.Header.Add("Accept", "application/json")
-	req.Header.Add("Referrer", "https://bongacams.com")
-	req.Header.Add("User-agent", "curl/7.79.1")
-
-	rsp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		fmt.Println(err.Error())
-		return false, v
-	}
-	defer rsp.Body.Close()
-
-	if err = json.NewDecoder(rsp.Body).Decode(v); err != nil {
-		fmt.Println(err.Error())
-		return false, v
-	}
-	
-	return true, v
-}
-
-func startRoom(room, server, proxy string, u url.URL) {
+func startRoom(room, server, proxy string, u *url.URL) {
 	// curl -vvv -X POST -H "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" -H "X-Requested-With: XMLHttpRequest" -d "method=getRoomData" -d "args[]=Icehotangel"   "https://rt.bongocams.com/tools/amf.php?res=771840&t=1654437233142"
 
 	fmt.Println("Start", room, "server", server, "proxy", proxy)
 
-	ok, v := getAMF(room)
-	if !ok {
-		fmt.Println("exit: no amf parms")
-		return
-	}	
-	
 	Dialer := *websocket.DefaultDialer
 
 	proxyMap := make(map[string]string)
@@ -96,23 +53,13 @@ func startRoom(room, server, proxy string, u url.URL) {
 			HandshakeTimeout: 45 * time.Second, // https://pkg.go.dev/github.com/gorilla/websocket
 		}
 	}
-	
+
 	c, _, err := Dialer.Dial(u.String(), nil)
 	if err != nil {
 		fmt.Println(err.Error())
 		return
 	}
 
-	pid := 1	
-	now := time.Now().Unix()
-	ping := now+30
-	
-	if err = c.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"id":%d,"name":"joinRoom","args":["%s",{"username":"%s","displayName":"%s","location":"%s","chathost":"%s","isRu":%t,"isPerformer":false,"hasStream":false,"isLogged":false,"isPayable":false,"showType":"public"},"%s"]}`, pid, v.UserData.Chathost, v.UserData.Username, v.UserData.DisplayName, v.UserData.Location, v.UserData.Chathost, v.UserData.IsRu, v.LocalData.DataKey))); err != nil {
-		fmt.Println(err.Error())
-		return
-	}
-	
-	
 	defer c.Close()
 	for {
 		_, message, err := c.ReadMessage()
@@ -121,28 +68,7 @@ func startRoom(room, server, proxy string, u url.URL) {
 			return
 		}
 
-		if pid == 1 {
-			pid++
-			fmt.Println("send ChatModule.connect")
-			if err = c.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"id":%d,"name":"ChatModule.connect","args":["public-chat"]}`, pid))); err != nil {
-				fmt.Println(err.Error())
-				return
-			}
-			continue
-		}
-		
-		now = time.Now().Unix()
-			
-		if(now > ping){
-			pid++
-			fmt.Println("send ping", pid)
-			if err = c.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"id":%d,"name":"ping"}`, pid))); err != nil {
-				return
-			}
-			ping = now+30
-		}
-			
-		//fmt.Println(string(message))d
+		// fmt.Println(string(message))d
 
 		m := &ServerResponse{}
 
@@ -150,20 +76,9 @@ func startRoom(room, server, proxy string, u url.URL) {
 			fmt.Println(err.Error())
 			continue
 		}
-		
-		if m.Type == "ServerMessageEvent:PERFORMER_STATUS_CHANGE" && bytes.Contains(m.Body, []byte(`offile`)) {
-			return
-		}
-		
-		if m.Type == "ServerMessageEvent:ROOM_CLOSE" {
-			return
-		}
-		
-		if m.Type == "ServerMessageEvent:INCOMING_TIP" {
-			d := &DonateResponse{}
-			if err = json.Unmarshal(m.Body, d); err == nil {
-				fmt.Println(d.F.Username, " send ", d.A, "tokens")
-			}
+
+		if m.Params.Message.Details.LovenseDetails.Type == "tip" {
+			fmt.Println(m.Params.Message.Details.LovenseDetails.Detail.Name, " send ", m.Params.Message.Details.LovenseDetails.Detail.Amount, "tokens")
 		}
 	}
 }
