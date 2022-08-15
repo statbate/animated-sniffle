@@ -46,7 +46,7 @@ func mapRooms() {
 	for {
 		select {
 		case m := <-rooms.Add:
-			data[m.room] = &Info{Server: m.Server, Proxy: m.Proxy, Start: m.Start, Last: m.Last, Online: m.Online, Income: m.Income, Dons: m.Dons, Tips: m.Tips, ch: m.ch}
+			data[m.room] = &Info{Server: m.Server, Proxy: m.Proxy, Rid: m.Rid, Start: m.Start, Last: m.Last, Online: m.Online, Income: m.Income, Dons: m.Dons, Tips: m.Tips, ch: m.ch}
 
 		case s := <-rooms.Json:
 			j, err := json.Marshal(data)
@@ -266,7 +266,7 @@ func xWorker(workerData Info, u url.URL) {
 					workerData.Dons++
 				}
 
-				save <- saveData{workerData.room, d.F.Username, workerData.Rid, d.A, now}
+				save <- saveData{workerData.room, strings.ToLower(d.F.Username), workerData.Rid, d.A, now}
 
 				workerData.Income += d.A
 				rooms.Add <- workerData
