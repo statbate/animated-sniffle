@@ -93,7 +93,7 @@ func getAMF(room string) (bool, *AuthResponse) {
 
 	v := &AuthResponse{}
 
-	req, err := http.NewRequest(http.MethodPost, "https://rt.bongocams.com/tools/amf.php?res=771840&t=1654437233142", strings.NewReader(`method=getRoomData&args[]=`+room))
+	req, err := http.NewRequest(http.MethodPost, "https://rt.bongocams.com/tools/amf.php", strings.NewReader(`method=getRoomData&args[]=`+room))
 	if err != nil {
 		fmt.Println(err.Error())
 		return false, v
@@ -101,8 +101,7 @@ func getAMF(room string) (bool, *AuthResponse) {
 	req.Header.Add("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
 	req.Header.Add("X-Requested-With", "XMLHttpRequest")
 	req.Header.Add("Accept", "application/json")
-	req.Header.Add("Referrer", "https://bongacams.com")
-	req.Header.Add("User-agent", "curl/7.79.1")
+	req.Header.Add("User-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/60.0.3112.101 Safari/537.36")
 
 	rsp, err := http.DefaultClient.Do(req)
 	if err != nil {
