@@ -81,14 +81,14 @@ func announceCount() {
 		rooms.Count <- 0
 		l := <-rooms.Count
 		msg, err := json.Marshal(struct {
-			Chanel  string `json:"chanel"`
-			Count   int `json:"count"`
+			Chanel string `json:"chanel"`
+			Count  int    `json:"count"`
 		}{
 			Chanel: "bongacams",
 			Count:  l,
 		})
 		if err == nil {
-			ws.Send <- msg
+			socketServer <- msg
 		}
 	}
 }
