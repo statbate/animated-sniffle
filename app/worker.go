@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"encoding/base64"
 )
 
 var uptime = time.Now().Unix()
@@ -93,33 +94,10 @@ func announceCount() {
 	}
 }
 
-func getAMF(room string) (bool, *AuthResponse) {
-
-	v := &AuthResponse{}
-
-	req, err := http.NewRequest(http.MethodPost, "https://rt.bongocams.com/tools/amf.php", strings.NewReader(`method=getRoomData&args[]=`+room))
-	if err != nil {
-		fmt.Println(err.Error())
-		return false, v
-	}
-	req.Header.Add("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
-	req.Header.Add("X-Requested-With", "XMLHttpRequest")
-	req.Header.Add("Accept", "application/json")
-	req.Header.Add("User-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/60.0.3112.101 Safari/537.36")
-
-	rsp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		fmt.Println(err.Error())
-		return false, v
-	}
-	defer rsp.Body.Close()
-
-	if err = json.NewDecoder(rsp.Body).Decode(v); err != nil {
-		fmt.Println(err.Error())
-		return false, v
-	}
-
-	return true, v
+func reconnectRoom(workerData Info) {
+	time.Sleep(5 * time.Second)
+	fmt.Println("reconnect:", workerData.room, workerData.Proxy)
+	startRoom(workerData)
 }
 
 func xWorker(workerData Info, u url.URL) {
@@ -131,9 +109,23 @@ func xWorker(workerData Info, u url.URL) {
 		rooms.Del <- workerData.room
 	}()
 
-	ok, v := getAMF(workerData.room)
-	if !ok {
-		fmt.Println("exit: no amf parms")
+	b64, err := base64.StdEncoding.DecodeString(workerData.Params)
+	if err != nil {
+		fmt.Println(err, workerData.room)
+		return
+	}
+
+	v := struct {
+		Chathost    string `json:"chathost"`
+		Username    string `json:"username"`
+		DisplayName string `json:"displayName"`
+		Location    string `json:"location"`
+		IsRu        bool   `json:"isRu"`
+		DataKey     string `json:"dataKey"`
+	}{}
+	
+	if err := json.Unmarshal(b64, &v); err != nil {
+		fmt.Println("exit: no amf parms", workerData.room, err)
 		return
 	}
 
@@ -160,7 +152,7 @@ func xWorker(workerData Info, u url.URL) {
 
 	c.SetReadDeadline(time.Now().Add(60 * time.Second))
 
-	if err = c.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"id":%d,"name":"joinRoom","args":["%s",{"username":"%s","displayName":"%s","location":"%s","chathost":"%s","isRu":%t,"isPerformer":false,"hasStream":false,"isLogged":false,"isPayable":false,"showType":"public"},"%s"]}`, 1, v.UserData.Chathost, v.UserData.Username, v.UserData.DisplayName, v.UserData.Location, v.UserData.Chathost, v.UserData.IsRu, v.LocalData.DataKey))); err != nil {
+	if err = c.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"id":%d,"name":"joinRoom","args":["%s",{"username":"%s","displayName":"%s","location":"%s","chathost":"%s","isRu":%t,"isPerformer":false,"hasStream":false,"isLogged":false,"isPayable":false,"showType":"public"},"%s"]}`, 1, v.Chathost, v.Username, v.DisplayName, v.Location, v.Chathost, v.IsRu, v.DataKey))); err != nil {
 		fmt.Println(err.Error())
 		return
 	}
@@ -218,9 +210,18 @@ func xWorker(workerData Info, u url.URL) {
 	}()
 
 	dons := make(map[string]struct{})
+	
+	timeout := time.NewTicker(60 * 60 * 8 * time.Second)
+	defer timeout.Stop()
+	
+	var income int64
+	income = 0
 
 	for {
 		select {
+		case <-timeout.C:
+			fmt.Println("too_long exit:", workerData.room)
+			return
 		case <-workerData.ch:
 			fmt.Println("Exit room:", workerData.room)
 			return
@@ -230,23 +231,25 @@ func xWorker(workerData Info, u url.URL) {
 		c.SetReadDeadline(time.Now().Add(30 * time.Minute))
 		_, message, err := c.ReadMessage()
 		if err != nil {
-			fmt.Println(err.Error())
+			if income > 1 && websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway) {
+				go reconnectRoom(workerData)
+			}
 			return
 		}
 
 		now := time.Now().Unix()
-
 		slog <- saveLog{workerData.Rid, now, string(message)}
+		
+		if now > workerData.Last+60*60 {
+			fmt.Println("no_tips exit:", workerData.room)
+			return
+		}
 
 		m := &ServerResponse{}
-
 		if err = json.Unmarshal(message, m); err != nil {
 			fmt.Println(err.Error(), workerData.room)
 			continue
 		}
-
-		workerData.Last = now
-		rooms.Add <- workerData
 
 		if m.Type == "ServerMessageEvent:PERFORMER_STATUS_CHANGE" && string(m.Body) == `"offline"` {
 			fmt.Println(m.Type, workerData.room)
@@ -261,7 +264,6 @@ func xWorker(workerData Info, u url.URL) {
 		if m.Type == "ServerMessageEvent:INCOMING_TIP" {
 			d := &DonateResponse{}
 			if err = json.Unmarshal(m.Body, d); err == nil {
-				//fmt.Println(d.F.Username, "send", d.A, "tokens")
 
 				workerData.Tips++
 				if _, ok := dons[d.F.Username]; !ok {
@@ -271,8 +273,13 @@ func xWorker(workerData Info, u url.URL) {
 
 				save <- saveData{workerData.room, strings.ToLower(d.F.Username), workerData.Rid, d.A, now}
 
+				income += d.A
+				
+				workerData.Last = now
 				workerData.Income += d.A
 				rooms.Add <- workerData
+				
+				fmt.Println(d.F.Username, "send", d.A, "tokens to", workerData.room)
 			}
 		}
 	}

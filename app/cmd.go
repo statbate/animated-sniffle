@@ -16,6 +16,7 @@ type Info struct {
 	ch     chan struct{}
 	room   string
 	Server string `json:"server"`
+	Params string `json:"params"`
 	Proxy  string `json:"proxy"`
 	Online string `json:"online"`
 	Rid    int64  `json:"rid"`
@@ -71,11 +72,12 @@ func cmdHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	params := r.URL.Query()
-	if len(params["room"]) > 0 && len(params["server"]) > 0 && len(params["proxy"]) > 0 {
+	if len(params["room"]) > 0 && len(params["server"]) > 0 && len(params["proxy"]) > 0 && len(params["params"]) > 0 {
 		now := time.Now().Unix()
 		workerData := Info{
 			room:   params["room"][0],
 			Server: params["server"][0],
+			Params: params["params"][0],
 			Proxy:  params["proxy"][0],
 			Online: "0",
 			Start:  now,

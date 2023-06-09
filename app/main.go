@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"log"
-	"math/rand"
 	"net"
 	"net/http"
 	"os"
@@ -45,7 +44,6 @@ var (
 )
 
 func main() {
-	rand.Seed(time.Now().UnixNano())
 
 	startConfig()
 
@@ -120,10 +118,6 @@ func socketHandler() {
 
 		}
 	}
-}
-
-func randInt(min int, max int) int {
-	return min + rand.Intn(max-min)
 }
 
 func fastStart() {
